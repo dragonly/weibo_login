@@ -13,18 +13,26 @@ Updated on APril 16, 2014
 @author: wanghaisheng
 '''
 
+"""
+Nov. 19, 2014
+change to handy APIs such as requests, beautifulsoup4, etc.
+dragonly<liyilongko@gmail.com>
+"""
+
 try:
     import os
     import sys
     import urllib
-    import urllib2
-    import cookielib
     import base64
     import re
     import hashlib
     import json
     import rsa
     import binascii
+    import getpass
+    import requests
+    import pickle
+    from bs4 import BeautifulSoup as BS
 
 except ImportError:
         print >> sys.stderr, """\
@@ -45,23 +53,21 @@ which is:
 """ % (sys.exc_info(), sys.version)
         sys.exit(1)
 
+reload(sys)
+sys.setdefaultencoding('utf-8')
 
-__prog__= "weibo_login"
-__site__= "http://yoyzhou.github.com"
-__weibo__= "@pigdata"
-__version__="0.1 beta"
-
+S = requests.Session()
 
 def get_prelogin_status(username):
     """
     Perform prelogin action, get prelogin status, including servertime, nonce, rsakv, etc.
     """
-    #prelogin_url = 'http://login.sina.com.cn/sso/prelogin.php?entry=weibo&callback=sinaSSOController.preloginCallBack&client=ssologin.js(v1.4.5)'
-    prelogin_url = 'http://login.sina.com.cn/sso/prelogin.php?entry=weibo&callback=sinaSSOController.preloginCallBack&su=' + get_user(username) + \
-     '&rsakt=mod&checkpin=1&client=ssologin.js(v1.4.11)';
-    data = urllib2.urlopen(prelogin_url).read()
+    # prelogin_url = 'http://login.sina.com.cn/sso/prelogin.php?entry=weibo&callback=sinaSSOController.preloginCallBack&su=' + get_user(username) + '&rsakt=mod&checkpin=1&client=ssologin.js(v1.4.18)';
+    prelogin_url = 'http://login.sina.com.cn/sso/prelogin.php?entry=account&callback=sinaSSOController.preloginCallBack&su=' + get_user(username) + '&rsakt=mod&client=ssologin.js(v1.4.15)'
+    data = S.get(prelogin_url).text
     p = re.compile('\((.*)\)')
     
+    # print data
     try:
         json_data = p.search(data).group(1)
         data = json.loads(json_data)
@@ -70,48 +76,44 @@ def get_prelogin_status(username):
         rsakv = data['rsakv']
         return servertime, nonce, rsakv
     except:
-        print 'Getting prelogin status met error!'
+        print 'Getting prelogin status error!'
         return None
 
 
-def login(username, pwd, cookie_file):
+def login(username, pwd, cookies_file):
     """"
         Login with use name, password and cookies.
         (1) If cookie file exists then try to load cookies;
         (2) If no cookies found then do login
     """
-    #If cookie file exists then try to load cookies
-    if os.path.exists(cookie_file):
+    global S
+    if os.path.exists(cookies_file):
         try:
-            cookie_jar  = cookielib.LWPCookieJar(cookie_file)
-            cookie_jar.load(ignore_discard=True, ignore_expires=True)
-            loaded = 1
-        except cookielib.LoadError:
-            loaded = 0
+            with open(cookies_file, 'rt') as fd:
+                cookies_dict = requests.utils.cookiejar_from_dict(pickle.load(fd))
+                # print 'cookies from file:\n', cookies_dict
+                # S = requests.Session(cookies=cookies_dict)
+                S.cookies = cookies_dict
+        except Exception, e:
             print 'Loading cookies error'
-        
-        #install loaded cookies for urllib2
-        if loaded:
-            cookie_support = urllib2.HTTPCookieProcessor(cookie_jar)
-            opener         = urllib2.build_opener(cookie_support, urllib2.HTTPHandler)
-            urllib2.install_opener(opener)
-            print 'Loading cookies success'
-            return 1
-        else:
-            return do_login(username, pwd, cookie_file)
-    
+            print e
+            return do_login(username, pwd, cookies_file)
+
+        print 'Loading cookies success'
+        return 1
     else:   #If no cookies found
-        return do_login(username, pwd, cookie_file)
+        # print "do_login()"
+        return do_login(username, pwd, cookies_file)
 
 
-def do_login(username,pwd,cookie_file):
+def do_login(username,pwd,cookies_file):
     """"
     Perform login action with use name, password and saving cookies.
     @param username: login user name
     @param pwd: login password
-    @param cookie_file: file name where to save cookies when login succeeded 
+    @param cookies_file: file name where to save cookies when login succeeded 
     """
-    #POST data per LOGIN WEIBO, these fields can be captured using httpfox extension in FIrefox
+    global S
     login_data = {
         'entry': 'weibo',
         'gateway': '1',
@@ -133,47 +135,42 @@ def do_login(username,pwd,cookie_file):
         'returntype': 'META'
         }
 
-    cookie_jar2     = cookielib.LWPCookieJar()
-    cookie_support2 = urllib2.HTTPCookieProcessor(cookie_jar2)
-    opener2         = urllib2.build_opener(cookie_support2, urllib2.HTTPHandler)
-    urllib2.install_opener(opener2)
-    login_url = 'http://login.sina.com.cn/sso/login.php?client=ssologin.js(v1.4.11)'
+    login_url = 'http://login.sina.com.cn/sso/login.php?client=ssologin.js(v1.4.18)'
     try:
         servertime, nonce, rsakv = get_prelogin_status(username)
     except:
-        return
+        return 0
     
-    #Fill POST data
-    print 'starting to set login_data'
     login_data['servertime'] = servertime
     login_data['nonce'] = nonce
     login_data['su'] = get_user(username)
     login_data['sp'] = get_pwd_rsa(pwd, servertime, nonce)
     login_data['rsakv'] = rsakv
-    login_data = urllib.urlencode(login_data)
-    http_headers = {'User-Agent':'Mozilla/5.0 (X11; Linux i686; rv:8.0) Gecko/20100101 Firefox/8.0'}
-    req_login  = urllib2.Request(
-        url = login_url,
-        data = login_data,
-        headers = http_headers
-    )
-    result = urllib2.urlopen(req_login)
-    text = result.read()
-    p = re.compile('location\.replace\(\'(.*?)\'\)')
-    #在使用httpfox登录调试时，我获取的返回参数  location.replace('http://weibo.com 这里使用的是单引号 原来的正则中匹配的是双引号# 导致没有login_url得到 单引号本身在re中无需转义
-	#p = re.compile('location\.replace\(\B'(.*?)'\B\)') 经调试 这样子是错误的 re中非的使用\'才能表达单引号
+    # print login_data
+    # login_data = urllib.urlencode(login_data)
+    http_headers = {'User-Agent':'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_10_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/39.0.2171.71 Safari/537.36'}
+
+    text = requests.get(login_url, params=login_data, headers=http_headers).text
+    # print text
+
+    # check if need to input CAPTCHA
+    p = re.compile(r"location\.replace\(['\"](.*?)['\"]\)")
+    login_ret = p.search(text).group(1)
+
     try:
-        #Search login redirection URL
-        login_url = p.search(text).group(1)
-        data = urllib2.urlopen(login_url).read()
-        #Verify login feedback, check whether result is TRUE
+        data = S.get(login_ret).text
+        
         patt_feedback = 'feedBackUrlCallBack\((.*)\)'
         p = re.compile(patt_feedback, re.MULTILINE)
         
         feedback = p.search(data).group(1)
         feedback_json = json.loads(feedback)
+        # print feedback_json['result']
         if feedback_json['result']:
-            cookie_jar2.save(cookie_file,ignore_discard=True, ignore_expires=True)
+            cookies_dict = requests.utils.dict_from_cookiejar(S.cookies)
+            # print cookies_dict
+            with open('cookies.txt', 'wt') as fd:
+                pickle.dump(cookies_dict, fd)
             return 1
         else:
             return 0
@@ -218,20 +215,136 @@ def get_user(username):
     username = base64.encodestring(username_)[:-1]
     return username
 
+# crawler related
+def get_follow_list(url):
+    html = S.get(url).text
+
+    pattern = r'html":"(<div class="WB_cardwrap S_bg2">[^}]*?)"\}'
+    html = html.replace('\\t', '').replace('\\n', '').replace('\\r', '').replace('\\', '')
+    # print html
+    html_snippet = re.search(pattern, html).group(1)
+    
+    soup = BS(html_snippet)
+    # print soup.prettify()
+
+    # with open('follow_list.html', 'w') as fd:
+        # fd.write(html)
+        # fd.write('='*80)
+        # fd.write(soup.prettify())
+
+    followList = soup.find_all('li', class_='follow_item')
+    info = []
+    for item in followList:
+        d = {}
+        kv = [pair.split('=') for pair in item.attrs['action-data'].split('&')]
+        for pair in kv:
+            d[pair[0]] = pair[1]
+        
+        mod_info = item.find('dd', class_='mod_info')
+
+        # filter topics
+        is_topic = mod_info.find('div', class_='info_name').find('span')
+        if is_topic and is_topic.text == '#':
+            continue
+
+        nums = mod_info.find('div', class_='info_connect').find_all('span')
+        # print nums
+        d['following'] = nums[0].find('em').text
+        d['follower'] = nums[1].find('em').text
+        d['posts'] = nums[2].find('em').text
+
+        address = mod_info.find('div', class_='info_add')
+        if address:
+            address = address.find('span').text
+        introduction = mod_info.find('div', class_='info_intro')
+        if introduction:
+            introduction = introduction.find('span').text
+        follow_from = mod_info.find('div', class_='info_from')
+        if follow_from:
+            follow_from = follow_from.find('a').text
+
+        d['address'] = address
+        d['introduction'] = introduction
+        d['follow_from'] = follow_from
+
+        info.append(d)
+
+    print '-'*100
+    for i in info:
+        for key in i.keys():
+            print key, ':', i[key]
+        print '-'*60
+
+def get_posts(url):
+    html = S.get(url).text
+    with open('posts.html', 'wt') as fd:
+        left = html.find('<!--feed内容-->') + 13
+        right = html.find('"}', left + 1)
+        html = html[left:right].replace('\\t', '').replace('\\n', '').replace('\\r', '').replace('\\', '')
+        fd.write(BS(html).prettify())
+
+def escape_unicode(text):
+    remove = ['\\n', '\\r', '\\t', '\\', '{"code":"100000","msg":"","data":"', '"}']
+
+    pUnicodeReplace = re.compile(r'u(?=[0-9a-f]{4})')
+    pUnicode = re.compile(r'u[0-9a-f]{4}')
+
+    for i in remove:
+        text = text.replace(i, '')
+    for i in pUnicode.finditer(text):
+        original = i.group(0)
+        modified = ('\\' + original).decode('unicode-escape')
+        text = text.replace(original, modified)
+    return text
+
+def test_params():
+    url_home = "http://weibo.com/qianwenzhong1?page="
+    url_mbloglist = "http://weibo.com/p/aj/v6/mblog/mbloglist"
+    params = {}
+    params['pre_page'] = 1
+    params['page'] = 1
+    params['pagebar'] = 0
+    for i in range(3):
+        html = S.get(url_home + str(i + 1)).text
+
+        left = html.find('$CONFIG[\'domain\']=\'') + 19
+        right = html.find('\'', left + 1)
+        params['domain'] = html[left:right]
+
+        left = html.find('$CONFIG[\'page_id\']=\'') + 20
+        right = html.find('\'', left + 1)
+        params['id'] = html[left:right]
+        # print 'domain:', params['domain'], '| id:', params['id']
+
+        left = html.find('<!--feed内容-->') + 13
+        right = html.find('"}', left + 1)
+        html = html[left:right].replace('\\t', '').replace('\\n', '').replace('\\r', '').replace('\\', '')
+
+        for j in range(2):
+            html_snippet = S.get(url_mbloglist, params = params).text
+            html += escape_unicode(html_snippet)
+            params['pagebar'] += 1
+
+        with open('html_snippet/page' + str(i + 1) + '.html', 'wt') as fd:
+            fd.write(BS(html).prettify())
+
+        params['pre_page'] += 1
+        params['page'] += 1
+        params['pagebar'] = 0
 
 if __name__ == '__main__':
     
+    username = 'weibopachong_1@163.com'
+    pwd = getpass.getpass()
+    cookies_file = 'cookies.txt'
     
-    username = 'ur_user_name_here'
-    pwd = 'ur_password_here'
-    cookie_file = 'weibo_login_cookies.dat'
-    
-    if login(username, pwd, cookie_file):
+    if login(username, pwd, cookies_file):
         print 'Login WEIBO succeeded'
-	#if you see the above message, then do whatever you want with urllib2, following is a example for fetch Kaifu's Weibo Home Page
-	#Trying to fetch Kaifu Lee's Weibo home page
-	kaifu_page = urllib2.urlopen('http://www.weibo.com/kaifulee').read()
-	print kaifu_page
+        # get_follow_list('http://weibo.com/p/1035051708942053/follow?page=5')
+        # get_follow_list('http://weibo.com/p/1003061642351362/follow?from=page_100306&wvr=6&mod=headfollow#place')
+        # get_posts('http://weibo.com/u/1686830902')
+        test_params()
+
 
     else:
         print 'Login WEIBO failed'
